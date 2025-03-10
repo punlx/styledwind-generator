@@ -1,0 +1,39 @@
+{
+  "name": "vscode-styledwind-generator",
+  "displayName": "Styledwind Generator",
+  "description": "Generate or update typed generic for styled wind calls",
+  "version": "0.0.1",
+  "publisher": "punlx",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/punlx/styledwind-generator"
+  },
+  "activationEvents": [
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "styledwind.generateGeneric",
+        "title": "Generate styledwind Generic"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "typescript": "^4.x",
+    "vscode": "^1.x",
+    "vsce": "^2.x"
+  }
+}
