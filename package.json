@@ -2,7 +2,7 @@
   "name": "vscode-styledwind-generator",
   "displayName": "Styledwind Generator",
   "description": "Generate or update typed generic for styled wind calls",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "punlx",
   "engines": {
     "vscode": "^1.75.0"
