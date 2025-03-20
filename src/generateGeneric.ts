@@ -1,17 +1,18 @@
-// generateGeneric.ts
 export function generateGeneric(sourceCode: string): string {
-  // 1) หา styled`...` (บล็อกแรก)
-  //    *ถ้าต้องการรองรับหลายบล็อกในไฟล์เดียว อาจใช้ while loop แทน .exec() ครั้งเดียว
+  // -------------------------------------------------------------------------
+  // 1) หา styled`...` (บล็อกแรก) ด้วย Regex ที่จับ prefix + เนื้อหาใน backtick
+  // -------------------------------------------------------------------------
   const styledRegex = /\b(styled\s*(?:<[^>]*>)?)`([^`]*)`/gs;
   const match = styledRegex.exec(sourceCode);
   if (!match) return sourceCode;
 
-  // เก็บค่า prefix กับเนื้อหาใน backtick
-  const fullMatch = match[0]; // "styled` ... `"
+  const fullMatch = match[0]; // ตัวเต็ม "styled ... ` ... `"
   const prefix = match[1]; // "styled" หรือ "styled<...>"
-  const templateContent = match[2]; // เนื้อหาใน backtick
+  const templateContent = match[2]; // โค้ดภายใน backtick
 
-  // 2) หา .className { ... } พร้อมดึงเนื้อหาข้างใน
+  // -------------------------------------------------------------------------
+  // 2) จับ class .xxx {...} เพื่อสร้าง classMap (เก็บ $xxx[...] เพื่อใส่ใน Generic)
+  // -------------------------------------------------------------------------
   const classRegex = /\.(\w+)(?:\([^)]*\))?\s*\{([^}]*)\}/g;
   const classMap: Record<string, Set<string>> = {};
 
@@ -24,103 +25,162 @@ export function generateGeneric(sourceCode: string): string {
       classMap[clsName] = new Set();
     }
 
-    // 2.1) จับ pseudo function (hover, focus, active, ฯลฯ) ยกเว้น screen, container
-    //      หากพบ $xxx[...] ข้างใน ก็เก็บเป็น $xxx-hover, $xxx-focus ฯลฯ
+    // จับ pseudo function ยกเว้น screen, container
     const pseudoFnRegex =
       /\b(hover|focus|active|focus-visible|focus-within|target|before|after|screen|container)\s*\(([^)]*)\)/g;
     let fnMatch: RegExpExecArray | null;
 
     while ((fnMatch = pseudoFnRegex.exec(innerContent)) !== null) {
-      const pseudoFn = fnMatch[1]; // เช่น 'hover', 'focus', 'screen', ...
-      const inside = fnMatch[2]; // ข้อความข้างในวงเล็บ
+      const pseudoFn = fnMatch[1];
+      const inside = fnMatch[2];
 
-      // ถ้าเป็น screen, container ให้ข้าม (ไม่ generate type)
       if (pseudoFn === 'screen' || pseudoFn === 'container') {
-        continue;
+        continue; // ไม่ใส่ใน generic
       }
 
-      // หา $xxx[...] ภายใน (ใช้ (\$[\w-]+)\[ เพื่อจับทั้ง $ และชื่อ style)
+      // หา $xxx[...] ภายใน pseudo
       const styleMatches = [...inside.matchAll(/(\$[\w-]+)\[/g)].map((m) => m[1]);
-      // ต่อท้ายชื่อด้วย -hover / -focus / -before / -after ฯลฯ
       for (const styleName of styleMatches) {
-        const newName = `${styleName}-${pseudoFn}`; // เช่น $bg-hover
-        classMap[clsName].add(newName);
+        classMap[clsName].add(`${styleName}-${pseudoFn}`);
       }
     }
 
-    // 2.2) จับ $xxx[...] ที่ *นอก* pseudo function
-    //      วิธีง่าย ๆ คือทำสำเนา innerContent มาลบฟังก์ชัน pseudo ทิ้ง แล้วค่อยหา
-    //      เพื่อไม่ให้จับซ้ำซ้อนกัน
+    // จับ $xxx[...] นอก pseudo function
     const pseudoFnRegexForRemove =
       /\b(?:hover|focus|active|focus-visible|focus-within|target|before|after|screen|container)\s*\(([^)]*)\)/g;
     const contentWithoutFn = innerContent.replace(pseudoFnRegexForRemove, '');
 
-    // หา $xxx[...] ที่โผล่ตรง ๆ ข้างนอก
     const directMatches = [...contentWithoutFn.matchAll(/(\$[\w-]+)\[/g)].map((m) => m[1]);
     for (const styleName of directMatches) {
       classMap[clsName].add(styleName);
     }
   }
 
-  // 3) สร้าง Generic object เช่น { box: ["$bg-hover", ...], card: [...], ... }
-  const entries = Object.keys(classMap).map((clsName) => {
+  // -------------------------------------------------------------------------
+  // 3) แยก directive (@scope, @bind) ออกจากเนื้อหา เพื่อ:
+  //    - เก็บ @bind ไว้สร้าง type ใหม่ใน generic
+  //    - เก็บ @scope/@bind ไว้จัด format ด้านบน
+  //    - ส่วนที่เหลือคือ .box {...} นำไปจัด indent ด้วย logic เดิม
+  // -------------------------------------------------------------------------
+  const lines = templateContent.split('\n');
+  const scopeLines: string[] = [];
+  const bindLines: string[] = [];
+  const normalLines: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      // บรรทัดว่าง -> ข้าม (หรือจะเก็บไว้ก็ได้ แต่ในตัวอย่างเลือกทิ้ง)
+      continue;
+    }
+    if (trimmed.startsWith('@scope ')) {
+      scopeLines.push(trimmed);
+    } else if (trimmed.startsWith('@bind ')) {
+      bindLines.push(trimmed);
+    } else {
+      normalLines.push(trimmed);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 4) สร้าง "bindMap" -> key จาก @bind => { key: [] }
+  //    แล้วรวม bindMap + classMap => finalGenericObj
+  // -------------------------------------------------------------------------
+  const bindKeys: string[] = [];
+  for (const bindLine of bindLines) {
+    // ตัวอย่าง "@bind box1and2 .box1 .box2" => split => ["@bind", "box1and2", ".box1", ".box2"]
+    const tokens = bindLine.split(/\s+/);
+    if (tokens.length > 1) {
+      const bindKey = tokens[1];
+      bindKeys.push(bindKey);
+    }
+  }
+
+  // 4.1) สร้าง entries ของ @bind (ว่าง [])
+  //      เรียงตามลำดับที่พบ
+  const bindEntries = bindKeys.map((key) => {
+    return `${key}: []`;
+  });
+
+  // 4.2) สร้าง entries ของ classMap (เหมือน logic เดิม)
+  const classEntries = Object.keys(classMap).map((clsName) => {
     const arr = Array.from(classMap[clsName]);
     const arrLiteral = arr.map((a) => `"${a}"`).join(', ');
     return `${clsName}: [${arrLiteral}]`;
   });
 
-  // รวมเป็น { box: [...], card: [...] }
-  const generatedGeneric = `{ ${entries.join(', ')} }`;
+  // 4.3) รวม bindEntries มาก่อน + classEntries ทีหลัง
+  const allEntries = [...bindEntries, ...classEntries];
+  // สร้างเป็น "{ key1: []; key2: []; class1: [...]; ... }"
+  const finalGeneric = `{ ${allEntries.join('; ')} }`;
 
-  // 4) ถ้า prefix เคยมี Generics อยู่แล้วให้ replace ถ้าไม่มีก็ใส่เพิ่ม
+  // -------------------------------------------------------------------------
+  // 5) ใส่ finalGeneric ลงไปใน prefix (styled<...>)
+  // -------------------------------------------------------------------------
   let newPrefix: string;
   if (prefix.includes('<')) {
-    // มี generics อยู่แล้ว เช่น styled<{...}>
-    newPrefix = prefix.replace(/<[^>]*>/, `<${generatedGeneric}>`);
+    newPrefix = prefix.replace(/<[^>]*>/, `<${finalGeneric}>`);
   } else {
-    // ไม่มี generics => ใส่เพิ่มไปเลย
-    newPrefix = prefix + `<${generatedGeneric}>`;
+    newPrefix = prefix + `<${finalGeneric}>`;
   }
 
-  // 5) จัด format block เดิม (templateContent) ทีละบรรทัด (ตามโค้ดเดิม)
-  const lines = templateContent.split('\n');
-  const formattedLines: string[] = [];
-
-  lines.forEach((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return; // ตัดบรรทัดว่างทิ้ง
-
-    // ปรับบรรทัด .xxx { => .xxx {
-    let modifiedLine = trimmed.replace(/\.(\w+)(?:\([^)]*\))?\s*\{/, (matchStr, className) => {
+  // -------------------------------------------------------------------------
+  // 6) จัดฟอร์แมตส่วน .box {...} ด้วย logic เดิม
+  // -------------------------------------------------------------------------
+  const formattedBlockLines: string[] = [];
+  for (const line of normalLines) {
+    // แทนที่ ".xxx {"
+    let modifiedLine = line.replace(/\.(\w+)(?:\([^)]*\))?\s*\{/, (m, className) => {
       return `.${className} {`;
     });
 
-    // ถ้าเป็นบรรทัดเปิด block class => เว้นบรรทัดก่อน
     if (/^\.\w+\s*\{/.test(modifiedLine)) {
-      if (formattedLines.length > 0) {
-        formattedLines.push('');
+      // บรรทัดเปิด block => เว้นบรรทัดก่อนถ้าไม่ใช่บรรทัดแรก
+      if (formattedBlockLines.length > 0) {
+        formattedBlockLines.push('');
       }
-      formattedLines.push(`\t${modifiedLine}`);
-    }
-    // ถ้าปิดบล็อค => แค่ indent เดียว
-    else if (modifiedLine === '}') {
-      formattedLines.push(`\t${modifiedLine}`);
-    }
-    // นอกนั้น => indent สองชั้น
-    else {
-      // ตรงนี้ก็ replace [...] ไว้สำหรับจัด spacing ภายใน [... ]
-      // ไม่ตัดเครื่องหมาย $ ทิ้ง แค่จัด format
+      formattedBlockLines.push(`\t${modifiedLine}`);
+    } else if (modifiedLine === '}') {
+      // ปิด block => indent 1 tab
+      formattedBlockLines.push(`\t${modifiedLine}`);
+    } else {
+      // อื่น ๆ => indent 2 tab
+      // จัด spacing ภายใน [ ... ]
       modifiedLine = modifiedLine.replace(/([\w-]+)\[\s*(.*?)\s*\]/g, '$1[$2]');
-      formattedLines.push(`\t\t${modifiedLine}`);
+      formattedBlockLines.push(`\t\t${modifiedLine}`);
     }
-  });
+  }
 
-  // ประกอบกลับเป็น string
-  const cleanedContent = formattedLines.join('\n');
+  // -------------------------------------------------------------------------
+  // 7) รวม directive (scope + bind) ด้านบน + บรรทัดว่าง + formattedBlock
+  // -------------------------------------------------------------------------
+  const finalLines: string[] = [];
 
-  // 6) ประกอบเป็น styled<Generic>` ... `
-  const newStyledBlock = `${newPrefix}\`\n${cleanedContent}\n\``;
+  // @scope
+  for (const s of scopeLines) {
+    finalLines.push(`\t${s}`);
+  }
 
-  // 7) replace บล็อคเก่าใน source ด้วยบล็อคใหม่
+  // @bind
+  for (const b of bindLines) {
+    finalLines.push(`\t${b}`);
+  }
+
+  // ถ้ามี directive => เว้น 1 บรรทัด
+  if (scopeLines.length > 0 || bindLines.length > 0) {
+    finalLines.push('');
+  }
+
+  // ใส่ block ที่จัดแล้ว
+  finalLines.push(...formattedBlockLines);
+
+  const finalBlock = finalLines.join('\n');
+
+  // -------------------------------------------------------------------------
+  // 8) ประกอบเป็น styled<...>` + finalBlock + `
+  // -------------------------------------------------------------------------
+  const newStyledBlock = `${newPrefix}\`\n${finalBlock}\n\``;
+
+  // แทนที่ของเดิมใน sourceCode ด้วยบล็อกใหม่
   return sourceCode.replace(fullMatch, newStyledBlock);
 }
