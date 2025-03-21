@@ -36,8 +36,17 @@ export function generateGeneric(sourceCode: string): string {
       if (pseudoFn === 'screen' || pseudoFn === 'container') {
         continue; // ข้าม
       }
-      // หา $xxx[...] ภายใน pseudo
-      const styleMatches = [...inside.matchAll(/(\$[\w-]+)\[/g)].map((m) => m[1]);
+      // หา $xxx[...] ภายใน pseudo (แต่ต้องกรอง --$xxx)
+      const styleMatches = [...inside.matchAll(/(\$[\w-]+)\[/g)]
+        .filter((m) => {
+          const idx = m.index || 0;
+          // ถ้า 2 ตัวอักษรก่อนหน้าคือ '--' ให้ข้าม
+          if (idx >= 2 && inside.slice(idx - 2, idx) === '--') {
+            return false;
+          }
+          return true;
+        })
+        .map((m) => m[1]);
       for (const styleName of styleMatches) {
         targetSet.add(`${styleName}-${pseudoFn}`);
       }
@@ -48,7 +57,17 @@ export function generateGeneric(sourceCode: string): string {
       /\b(?:hover|focus|active|focus-visible|focus-within|target|before|after|screen|container)\s*\(([^)]*)\)/g;
     const contentWithoutFn = content.replace(pseudoFnRegexForRemove, '');
 
-    const directMatches = [...contentWithoutFn.matchAll(/(\$[\w-]+)\[/g)].map((m) => m[1]);
+    // หา $xxx[...] นอก pseudo (แต่ต้องกรอง --$xxx)
+    const directMatches = [...contentWithoutFn.matchAll(/(\$[\w-]+)\[/g)]
+      .filter((m) => {
+        const idx = m.index || 0;
+        // ถ้า 2 ตัวอักษรก่อนหน้าคือ '--' ให้ข้าม
+        if (idx >= 2 && contentWithoutFn.slice(idx - 2, idx) === '--') {
+          return false;
+        }
+        return true;
+      })
+      .map((m) => m[1]);
     for (const styleName of directMatches) {
       targetSet.add(styleName);
     }
