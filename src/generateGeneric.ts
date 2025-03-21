@@ -1,3 +1,4 @@
+// generateGeneric.ts
 export function generateGeneric(sourceCode: string): string {
   // -----------------------------------------------------------------------------
   // 1) หา styled`...` (บล็อกแรก) ด้วย Regex ที่จับ prefix + เนื้อหาใน backtick
