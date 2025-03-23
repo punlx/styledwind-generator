@@ -12,35 +12,27 @@ export function generateGeneric(sourceCode: string): string {
   const templateContent = match[2]; // โค้ดภายใน backtick
 
   // -----------------------------------------------------------------------------
-  // 2) เราจะเตรียมโครงสร้าง 2 ส่วน:
-  //    - classMap: เก็บ Set ของ $xxx สำหรับ ".boxX" (เหมือนเดิม)
-  //    - constMap: เก็บ Set ของ $xxx สำหรับ "@const cName" (ของใหม่)
+  // 2) เตรียมโครงสร้าง classMap / constMap
   // -----------------------------------------------------------------------------
   const classMap: Record<string, Set<string>> = {};
   const constMap: Record<string, Set<string>> = {};
 
   // -----------------------------------------------------------------------------
-  // 3) เราสร้างฟังก์ชันช่วย parse $xxx ในเนื้อหา (รวม pseudo):
-  //    (คือ logic เดิม ๆ ที่เคยทำใน classRegex, แต่สรุปเป็นฟังก์ชัน)
+  // 3) ฟังก์ชัน parse $xxx[...] (รวม pseudo)
   // -----------------------------------------------------------------------------
   function parseStylesIntoSet(content: string, targetSet: Set<string>) {
-    // 3.1) จับ pseudo function ยกเว้น screen, container
-    //      รูปแบบ: hover(...), focus(...), etc.
     const pseudoFnRegex =
       /\b(hover|focus|active|focus-visible|focus-within|target|before|after|screen|container)\s*\(([^)]*)\)/g;
     let fnMatch: RegExpExecArray | null;
     while ((fnMatch = pseudoFnRegex.exec(content)) !== null) {
       const pseudoFn = fnMatch[1];
       const inside = fnMatch[2];
-
       if (pseudoFn === 'screen' || pseudoFn === 'container') {
-        continue; // ข้าม
+        continue;
       }
-      // หา $xxx[...] ภายใน pseudo (แต่ต้องกรอง --$xxx)
       const styleMatches = [...inside.matchAll(/(\$[\w-]+)\[/g)]
         .filter((m) => {
           const idx = m.index || 0;
-          // ถ้า 2 ตัวอักษรก่อนหน้าคือ '--' ให้ข้าม
           if (idx >= 2 && inside.slice(idx - 2, idx) === '--') {
             return false;
           }
@@ -52,16 +44,13 @@ export function generateGeneric(sourceCode: string): string {
       }
     }
 
-    // 3.2) จับ $xxx[...] นอก pseudo
     const pseudoFnRegexForRemove =
       /\b(?:hover|focus|active|focus-visible|focus-within|target|before|after|screen|container)\s*\(([^)]*)\)/g;
     const contentWithoutFn = content.replace(pseudoFnRegexForRemove, '');
 
-    // หา $xxx[...] นอก pseudo (แต่ต้องกรอง --$xxx)
     const directMatches = [...contentWithoutFn.matchAll(/(\$[\w-]+)\[/g)]
       .filter((m) => {
         const idx = m.index || 0;
-        // ถ้า 2 ตัวอักษรก่อนหน้าคือ '--' ให้ข้าม
         if (idx >= 2 && contentWithoutFn.slice(idx - 2, idx) === '--') {
           return false;
         }
@@ -74,53 +63,42 @@ export function generateGeneric(sourceCode: string): string {
   }
 
   // -----------------------------------------------------------------------------
-  // 4) Parse @const ... { ... } ด้วย Regex แยกต่างหาก
-  //    แล้วใส่ข้อมูลใน constMap
+  // 4) Parse @const ... { ... } => ใส่ใน constMap
   // -----------------------------------------------------------------------------
-  // ตัวอย่าง: @const cName { ... } => เราดึง cName และ ... ไป parse
-  // หมายเหตุ: ถ้าไฟล์มีหลาย @const ติด ๆ กัน logic นี้จะเจอทั้งหมด
   {
     const constRegex = /@const\s+([\w-]+)\s*\{([^}]*)\}/g;
     let cMatch: RegExpExecArray | null;
     while ((cMatch = constRegex.exec(templateContent)) !== null) {
-      const constName = cMatch[1]; // เช่น "bgRed"
-      const constBody = cMatch[2]; // เนื้อหาใน { ... }
+      const constName = cMatch[1];
+      const constBody = cMatch[2];
       if (!constMap[constName]) {
         constMap[constName] = new Set();
       }
-
-      // parse pseudo + $xxx[...] ใน constBody
       parseStylesIntoSet(constBody, constMap[constName]);
     }
   }
 
   // -----------------------------------------------------------------------------
-  // 5) Parse .xxx { ... } ด้วย Regex (ของเดิม) เพื่อเก็บข้อมูลลง classMap
-  //    พร้อมตรวจ @use ... เพื่อ merge ข้อมูลจาก constMap เข้าไป
+  // 5) Parse .className { ... } => เก็บลง classMap + merge @use
   // -----------------------------------------------------------------------------
   {
     const classRegex = /\.(\w+)(?:\([^)]*\))?\s*\{([^}]*)\}/g;
     let classMatch: RegExpExecArray | null;
     while ((classMatch = classRegex.exec(templateContent)) !== null) {
-      const clsName = classMatch[1]; // เช่น "box1"
-      const innerContent = classMatch[2]; // เนื้อหาภายใน { ... }
+      const clsName = classMatch[1];
+      const innerContent = classMatch[2];
 
       if (!classMap[clsName]) {
         classMap[clsName] = new Set();
       }
 
-      // (A) ตรวจหา @use ... ใน innerContent
-      //     ตัวอย่าง: "@use cRed dFlex"
-      //     => ให้เรา split เอาชื่อ const
+      // (A) ตรวจ @use ...
       {
-        // Regex จับ: @use\s+([^\{\}\n]+) -> ข้อความหลัง @use
-        // แล้ว split space => ได้ ["cRed","dFlex"]
         const useRegex = /@use\s+([^\{\}\n]+)/g;
         let useMatch: RegExpExecArray | null;
         while ((useMatch = useRegex.exec(innerContent)) !== null) {
-          const usedConstsLine = useMatch[1]; // "cRed dFlex"
+          const usedConstsLine = useMatch[1];
           const usedConstNames = usedConstsLine.split(/\s+/).filter(Boolean);
-          // เอาทุก constName ไป merge set
           for (const cname of usedConstNames) {
             if (constMap[cname]) {
               for (const val of constMap[cname]) {
@@ -131,31 +109,25 @@ export function generateGeneric(sourceCode: string): string {
         }
       }
 
-      // (B) parse `$xxx[...]` และ pseudo function ในตัว innerContent เอง (เหมือนเดิม)
+      // (B) parse $xxx[...] + pseudo
       parseStylesIntoSet(innerContent, classMap[clsName]);
     }
   }
 
   // -----------------------------------------------------------------------------
-  // 6) ตอนนี้ classMap มี set ของ $xxx จากทั้ง direct (ใน .box) และ from @use
-  //    ต่อไปเหมือนเดิม: parse directive @scope, @bind, @const => จัด format
-  //    (ด้านล่างส่วน "format" เราแก้ code เล็กน้อยให้ใช้ structure เดิม)
+  // 6) แยก directive @scope, @bind, @const ออกจากเนื้อหา
   // -----------------------------------------------------------------------------
-
-  // แยกบรรทัดทั้งหมด
   const lines = templateContent.split('\n');
   const scopeLines: string[] = [];
   const bindLines: string[] = [];
-  const constBlocks: string[][] = []; // เก็บ block เดิมเพื่อนำไป format
+  const constBlocks: string[][] = [];
   const normalLines: string[] = [];
 
-  // ฟังก์ชันช่วยจัด spacing directive
   function normalizeDirectiveLine(line: string) {
     const tokens = line.split(/\s+/).filter(Boolean);
     return tokens.join(' ');
   }
 
-  // วน loop แยก @scope, @bind, @const, ฯลฯ
   {
     let i = 0;
     while (i < lines.length) {
@@ -177,7 +149,6 @@ export function generateGeneric(sourceCode: string): string {
         continue;
       }
       if (trimmed.startsWith('@const ')) {
-        // อ่าน block @const ... { ... } จนเจอ '}'
         const blockLines: string[] = [];
         blockLines.push(trimmed);
         i++;
@@ -197,7 +168,6 @@ export function generateGeneric(sourceCode: string): string {
         continue;
       }
 
-      // อื่น ๆ => normal
       normalLines.push(trimmed);
       i++;
     }
@@ -209,9 +179,8 @@ export function generateGeneric(sourceCode: string): string {
   const bindKeys: string[] = [];
   for (const bLine of bindLines) {
     const tokens = bLine.split(/\s+/);
-    // "@bind box1and2 .box1 .box2" -> [ "@bind", "box1and2", ".box1", ".box2" ]
     if (tokens.length > 1) {
-      bindKeys.push(tokens[1]); // "box1and2"
+      bindKeys.push(tokens[1]);
     }
   }
   const bindEntries = bindKeys.map((k) => `${k}: []`);
@@ -225,7 +194,6 @@ export function generateGeneric(sourceCode: string): string {
     return `${clsName}: [${arrLiteral}]`;
   });
 
-  // รวม bindEntries + classEntries
   const allEntries = [...bindEntries, ...classEntries];
   const finalGeneric = `{ ${allEntries.join('; ')} }`;
 
@@ -240,9 +208,8 @@ export function generateGeneric(sourceCode: string): string {
   }
 
   // -----------------------------------------------------------------------------
-  // 10) ฟอร์แมต @const block + .box block + directive เหมือนเดิม
+  // 10) ฟอร์แมต (@const block + .box block + directive) ตาม logic เดิม
   // -----------------------------------------------------------------------------
-
   // 10.1) format constBlocks
   const formattedConstBlocks: string[][] = [];
   for (const block of constBlocks) {
@@ -261,10 +228,10 @@ export function generateGeneric(sourceCode: string): string {
     formattedConstBlocks.push(temp);
   }
 
-  // 10.2) format .box {...} (normalLines) => เหมือน logic เดิม
+  // 10.2) format .box {...} (normalLines) => เหมือนเดิม
   const formattedBlockLines: string[] = [];
   for (const line of normalLines) {
-    let modifiedLine = line.replace(/\.(\w+)(?:\([^)]*\))?\s*\{/, (m, cName) => `.${cName} {`);
+    let modifiedLine = line.replace(/\.(\w+)(?:\([^)]*\))?\s*\{/, (_, cName) => `.${cName} {`);
     if (/^\.\w+\s*\{/.test(modifiedLine)) {
       if (formattedBlockLines.length > 0) {
         formattedBlockLines.push('');
@@ -278,7 +245,7 @@ export function generateGeneric(sourceCode: string): string {
     }
   }
 
-  // 10.3) รวมทุก directive + constBlocks + normal .box
+  // 10.3) รวม directive + constBlocks + normal block
   const finalLines: string[] = [];
 
   // @scope
@@ -289,12 +256,10 @@ export function generateGeneric(sourceCode: string): string {
   for (const b of bindLines) {
     finalLines.push(`\t${b}`);
   }
-  // ถ้ามี directive => เว้น 1 บรรทัด
   if (scopeLines.length > 0 || bindLines.length > 0) {
     finalLines.push('');
   }
 
-  // const blocks
   formattedConstBlocks.forEach((block, idx) => {
     if (idx > 0) {
       finalLines.push('');
@@ -305,15 +270,61 @@ export function generateGeneric(sourceCode: string): string {
     finalLines.push('');
   }
 
-  // .box block
   finalLines.push(...formattedBlockLines);
 
-  // ประกอบ
   const finalBlock = finalLines.join('\n');
+
+  // -----------------------------------------------------------------------------
+  // *** (เพิ่มเติม) 10.4) ฟอร์แมตรอบสอง: แค่เลื่อน 1 tab ให้บรรทัดใต้ @query ... { } ***
+  // -----------------------------------------------------------------------------
+  const finalBlock2 = secondPassQueryIndent(finalBlock);
 
   // -----------------------------------------------------------------------------
   // 11) Replace ลงใน sourceCode
   // -----------------------------------------------------------------------------
-  const newStyledBlock = `${newPrefix}\`\n${finalBlock}\n\``;
+  const newStyledBlock = `${newPrefix}\`\n${finalBlock2}\n\``;
   return sourceCode.replace(fullMatch, newStyledBlock);
+
+  // -----------------------------------------------------------------------------
+  // ฟังก์ชันเล็ก ๆ สำหรับรอบสอง: เพิ่ม 1 tab ใต้ @query
+  // -----------------------------------------------------------------------------
+  function secondPassQueryIndent(code: string): string {
+    const lines = code.split('\n');
+    const newLines: string[] = [];
+    let insideQuery = false;
+
+    function addOneTab(line: string): string {
+      return '\t' + line;
+    }
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // 1) ถ้าเจอ @query ... { ให้ start insideQuery = true
+      if (/^\s*@query\b.*\{/.test(line)) {
+        newLines.push(line); // บรรทัดเปิด @query ไม่ขยับ
+        insideQuery = true;
+        continue;
+      }
+
+      // 2) ถ้าเจอ '}' แล้วกำลัง insideQuery => ถือเป็นปิด @query
+      if (trimmed === '}') {
+        if (insideQuery) {
+          newLines.push(addOneTab(line));
+          insideQuery = false;
+        } else {
+          newLines.push(line);
+        }
+        continue;
+      }
+
+      // 3) ถ้าอยู่ใน @query => บวก 1 tab
+      if (insideQuery) {
+        newLines.push(addOneTab(line));
+      } else {
+        newLines.push(line);
+      }
+    }
+    return newLines.join('\n');
+  }
 }
